@@ -1,0 +1,112 @@
+pipeline {
+  agent any
+
+  environment {
+    DOCKERHUB_USERNAME = 'eg245453'
+    BACKEND_IMAGE      = 'projecthub-backend'
+    FRONTEND_IMAGE     = 'projecthub-frontend'
+    IMAGE_TAG          = "${env.BUILD_NUMBER}"
+  }
+
+  options { timestamps() }
+
+  stages {
+
+    stage('Checkout Code') {
+      steps {
+        checkout([
+          $class: 'GitSCM',
+          branches: [[name: '*/main']],
+          userRemoteConfigs: [[
+            url: 'https://github.com/supun-pregeeth/devops-fullstack-deploy.git'
+          ]]
+        ])
+      }
+    }
+
+    stage('Verify Required Files') {
+      steps {
+        sh '''
+          set -e
+          test -f docker-compose.yml
+          test -f Backend/Dockerfile
+          test -f Frontend/Dockerfile
+          echo "✅ Required files OK"
+        '''
+      }
+    }
+
+    stage('Build Backend Image') {
+      steps {
+        sh '''
+          set -e
+          docker build --pull --no-cache \
+            -t ${DOCKERHUB_USERNAME}/${BACKEND_IMAGE}:${IMAGE_TAG} \
+            -f Backend/Dockerfile Backend
+        '''
+      }
+    }
+
+    stage('Build Frontend Image') {
+      steps {
+        sh '''
+          set -e
+          docker build --pull --no-cache \
+            -t ${DOCKERHUB_USERNAME}/${FRONTEND_IMAGE}:${IMAGE_TAG} \
+            -f Frontend/Dockerfile Frontend
+        '''
+      }
+    }
+
+    stage('Push Images to Docker Hub') {
+      steps {
+        withDockerRegistry([credentialsId: 'dockerhub-creds', url: '']) {
+          sh '''
+            set -e
+            docker push ${DOCKERHUB_USERNAME}/${BACKEND_IMAGE}:${IMAGE_TAG}
+            docker push ${DOCKERHUB_USERNAME}/${FRONTEND_IMAGE}:${IMAGE_TAG}
+          '''
+        }
+      }
+    }
+
+    stage('Deploy on EC2 (Jenkins Host)') {
+      steps {
+        sh '''
+          set -e
+          cd "$WORKSPACE"
+
+          # Create env file for docker-compose variable substitution
+          cat > .env <<EOF
+DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
+BACKEND_IMAGE=${BACKEND_IMAGE}
+FRONTEND_IMAGE=${FRONTEND_IMAGE}
+IMAGE_TAG=${IMAGE_TAG}
+EOF
+
+          # Choose compose command
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE="docker compose"
+          else
+            COMPOSE="docker-compose"
+          fi
+
+          echo "==> Pull exact images for this build"
+          docker pull ${DOCKERHUB_USERNAME}/${BACKEND_IMAGE}:${IMAGE_TAG}
+          docker pull ${DOCKERHUB_USERNAME}/${FRONTEND_IMAGE}:${IMAGE_TAG}
+
+          echo "==> Deploy"
+          $COMPOSE --env-file .env -f docker-compose.yml up -d --force-recreate --remove-orphans
+
+          echo "==> Running containers (proof)"
+          docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+        '''
+      }
+    }
+  }
+
+  post {
+    success { echo "✅ Deployment successful!" }
+    failure { echo "❌ Deployment failed. Check console logs." }
+  }
+}
